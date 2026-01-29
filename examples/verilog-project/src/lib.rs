@@ -29,6 +29,9 @@ pub struct WideMain3;
 #[verilog(src = "src/wide_main.sv", name = "wide_main4")]
 pub struct WideMain4;
 
+#[verilog(src = "src/params.sv", name = "params_main", params = [("N", 10)])]
+pub struct ParamsMain;
+
 #[verilog(src = "src/dpi.sv", name = "dpi_main")]
 pub struct DpiMain;
 

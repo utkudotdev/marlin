@@ -668,6 +668,7 @@ pub fn parse_verilog_ports(
                     &ast,
                     top_name,
                     port_name,
+                    parameter_map,
                     dimensions,
                     port_direction_node,
                 ) {
@@ -689,6 +690,7 @@ fn process_port_common(
     ast: &sv::SyntaxTree,
     top_name: &syn::LitStr,
     port_name: &str,
+    parameter_map: &HashMap<&str, i64>,
     dimensions: &[sv::PackedDimension],
     port_direction_node: &sv::PortDirection,
 ) -> Result<(String, usize, usize, PortDirection), syn::Error> {
@@ -705,14 +707,30 @@ fn process_port_common(
             sv::PackedDimension::Range(packed_dimension_range) => {
                 let range = &packed_dimension_range.nodes.0.nodes.1.nodes;
                 (
-                    util::evaluate_numeric_constant_expression(ast, &range.0),
-                    util::evaluate_numeric_constant_expression(ast, &range.2),
+                    util::evaluate_numeric_constant_expression(
+                        ast,
+                        &range.0,
+                        parameter_map,
+                    ),
+                    util::evaluate_numeric_constant_expression(
+                        ast,
+                        &range.2,
+                        parameter_map,
+                    ),
                 )
             }
             _ => todo!("Unsupported dimension type"),
         },
         _ => todo!("Don't support multidimensional ports yet"),
     };
+
+    let port_msb_usize = port_msb.try_into().expect(
+        "Port MSB evaluates to negative constant or does not fit in `usize`.",
+    );
+
+    let port_lsb_usize = port_lsb.try_into().expect(
+        "Port LSB evaluates to negative constant or does not fit in `usize`.",
+    );
 
     let port_direction = match port_direction_node {
         sv::PortDirection::Input(_) => PortDirection::Input,
@@ -723,5 +741,10 @@ fn process_port_common(
         }
     };
 
-    Ok((port_name.to_string(), port_msb, port_lsb, port_direction))
+    Ok((
+        port_name.to_string(),
+        port_msb_usize,
+        port_lsb_usize,
+        port_direction,
+    ))
 }
