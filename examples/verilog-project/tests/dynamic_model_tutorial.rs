@@ -14,10 +14,7 @@
 
 use std::path::Path;
 
-use marlin::verilator::{
-    AsDynamicVerilatedModel, PortDirection, VerilatedModelConfig,
-    VerilatorRuntime, VerilatorRuntimeOptions, verilator_version,
-};
+use marlin::verilator::{PortDeclaration, verilator_version};
 use snafu::Whatever;
 
 #[test]
@@ -35,10 +32,12 @@ fn main() -> Result<(), Whatever> {
     let mut main = runtime.create_dyn_model(
         "main",
         "src/main.sv",
-        &[
-            ("medium_input", 31, 0, PortDirection::Input),
-            //("medium_output", 31, 0, PortDirection::Output),
-        ],
+        &[PortDeclaration {
+            name: "medium_input",
+            direction: PortDirection::Input,
+            lsb: 0,
+            width: 32,
+        }],
         VerilatedModelConfig::default(),
     )?;
 
@@ -53,8 +52,18 @@ fn main() -> Result<(), Whatever> {
         "main",
         "src/main.sv",
         &[
-            ("medium_input", 31, 0, PortDirection::Input),
-            ("medium_output", 31, 0, PortDirection::Output),
+            PortDeclaration {
+                name: "medium_input",
+                direction: PortDirection::Input,
+                lsb: 0,
+                width: 32,
+            },
+            PortDeclaration {
+                name: "medium_output",
+                direction: PortDirection::Output,
+                lsb: 0,
+                width: 32,
+            },
         ],
         VerilatedModelConfig::default(),
     )?;
