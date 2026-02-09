@@ -38,6 +38,7 @@ fn main() -> Result<(), Whatever> {
             lsb: 0,
             width: 32,
         }],
+        &[],
         VerilatedModelConfig::default(),
     )?;
 
@@ -65,6 +66,7 @@ fn main() -> Result<(), Whatever> {
                 width: 32,
             },
         ],
+        &[],
         VerilatedModelConfig::default(),
     )?;
 

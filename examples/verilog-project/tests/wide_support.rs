@@ -101,6 +101,7 @@ fn wide_main_forwards_correctly_dynamically() -> Result<(), Whatever> {
                 width: 65,
             },
         ],
+        &[],
         VerilatedModelConfig::default(),
     )?;
     #[allow(
