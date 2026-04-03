@@ -57,7 +57,7 @@ fn parse_verilog(
     source_path: &syn::LitStr,
     include_directories: &Vec<syn::LitStr>,
     module_params: &HashMap<syn::Ident, i64>,
-) -> Result<serde_json::Value, proc_macro2::TokenStream> {
+) -> Result<VerilatorJson, proc_macro2::TokenStream> {
     // TODO: we can probably do a lot of code sharing here? Should we cache these outputs? How bad is it to parse every time in a proc macro
 
     let resolved_source = resolve_input_path(source_path);
@@ -104,10 +104,10 @@ fn parse_verilog(
             .into_compile_error()
         })
         .and_then(|s| {
-            serde_json::from_str(&s).map_err(|_| {
+            serde_json::from_str(&s).map_err(|serde_err| {
                 syn::Error::new_spanned(
                     top_name,
-                    "Failed to parse verilator output.",
+                    format!("Failed to parse verilator output: {serde_err}"),
                 )
                 .into_compile_error()
             })
@@ -115,107 +115,149 @@ fn parse_verilog(
 }
 
 #[derive(Deserialize)]
-struct VerilatorJson<'a> {
-    #[serde(borrow)]
-    modulesp: Vec<VerilatorModule<'a>>,
+struct VerilatorJson {
+    modulesp: Vec<VerilatorJsonModule>,
+    miscsp: Vec<VerilatorJsonInfo>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-enum VerilatorModule<'a> {
+enum VerilatorJsonModule {
     #[serde(rename = "MODULE")]
     Module {
-        name: &'a str,
-        stmtsp: Vec<VerilatorStatement<'a>>,
+        name: String,
+        stmtsp: Vec<VerilatorJsonStatement>,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-enum VerilatorStatement<'a> {
+enum VerilatorJsonInfo {
+    #[serde(rename = "TYPETABLE")]
+    TypeTable { typesp: Vec<VerilatorJsonType> },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum VerilatorJsonStatement {
     #[serde(rename = "VAR")]
-    #[serde(borrow)]
-    Var(VerilatorVar<'a>),
+    Var(VerilatorJsonVar),
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum VerilatorJsonType {
+    #[serde(rename = "BASICDTYPE")]
+    BasicDType {
+        addr: String,
+        #[serde(default = "range_default")]
+        range: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+fn range_default() -> String {
+    "1:0".to_owned()
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "varType")]
-enum VerilatorVar<'a> {
+enum VerilatorJsonVar {
     #[serde(rename = "PORT")]
     Port {
-        name: &'a str,
-        dtypep: &'a str,
-        direction: VerilatorPortDirection,
+        name: String,
+        dtypep: String,
+        direction: VerilatorJsonPortDir,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Deserialize)]
-enum VerilatorPortDirection {
+enum VerilatorJsonPortDir {
     #[serde(rename = "OUTPUT")]
     Output,
     #[serde(rename = "INPUT")]
     Input,
+    #[serde(rename = "INOUT")]
+    Inout,
 }
 
-fn extract_verilog_ports<'a>(
-    top_name: &'a syn::LitStr,
-    json: &'a serde_json::Value,
-) -> Result<Vec<PortDeclaration<'a>>, proc_macro2::TokenStream> {
-    // TODO: make this suck less for error handling
-    let modules = json["modulesp"].as_array().unwrap();
-
-    let top_module = modules
+fn extract_verilog_ports<'json>(
+    top_name: &syn::LitStr,
+    json: &'json VerilatorJson,
+) -> Result<Vec<PortDeclaration<'json>>, proc_macro2::TokenStream> {
+    let ports = json
+        .modulesp
         .iter()
-        .filter(|m| m["type"] == "MODULE")
-        .find(|m| m["name"] == top_name.value())
-        .unwrap();
-
-    let statements = top_module["stmtsp"].as_array().unwrap();
-
-    let ports = statements
-        .iter()
-        .filter(|s| s["type"] == "VAR")
-        .filter(|s| s["varType"] == "PORT");
-
-    let misc = json["miscsp"].as_array().unwrap();
-    let typetable = misc
-        .iter()
-        .find(|info| info["type"] == "TYPETABLE")
-        .unwrap();
-    let all_types = typetable["typesp"].as_array().unwrap();
-
-    let type_map: HashMap<&str, &str> = all_types
-        .iter()
-        .filter(|ty| ty["type"] == "BASICDTYPE")
-        .map(|ty| {
-            (
-                ty["addr"].as_str().unwrap(),
-                ty.get("range")
-                    .map(|v| v.as_str().unwrap())
-                    .unwrap_or("1:0"),
+        .filter_map(|m| match m {
+            VerilatorJsonModule::Module { name, stmtsp }
+                if *name == top_name.value() =>
+            {
+                Some(stmtsp)
+            }
+            _ => None,
+        })
+        .next()
+        .ok_or(
+            syn::Error::new_spanned(
+                top_name,
+                format!("No Verilog module named \"{}\"", top_name.value()),
             )
+            .into_compile_error(),
+        )?
+        .iter()
+        .filter_map(|s| match s {
+            VerilatorJsonStatement::Var(VerilatorJsonVar::Port {
+                name,
+                dtypep,
+                direction,
+            }) => Some((name, dtypep, direction)),
+            _ => None,
+        });
+
+    let type_map: HashMap<&str, &str> = json
+        .miscsp
+        .iter()
+        .filter_map(|m| match m {
+            VerilatorJsonInfo::TypeTable { typesp } => Some(typesp),
+            _ => None,
+        })
+        .next()
+        .expect("No type table found in Verilator output")
+        .iter()
+        .filter_map(|ty| match ty {
+            VerilatorJsonType::BasicDType { addr, range } => {
+                Some((addr.as_str(), range.as_str()))
+            }
+            _ => None,
         })
         .collect();
 
     let mut result = vec![];
-    for port in ports {
-        let name = port["name"].as_str().unwrap();
-        let ty = port["dtypep"].as_str().unwrap();
-        let direction_str = port["direction"].as_str().unwrap();
-        let range_str = type_map[ty];
+    for (name, dtypep, direction) in ports {
+        let range_str = type_map[dtypep.as_str()];
 
-        let direction = match direction_str {
-            "OUTPUT" => PortDirection::Output,
-            "INPUT" => PortDirection::Input,
-            _ => todo!(),
+        let direction = match direction {
+            VerilatorJsonPortDir::Input => PortDirection::Input,
+            VerilatorJsonPortDir::Output => PortDirection::Output,
+            VerilatorJsonPortDir::Inout => PortDirection::Inout,
         };
 
         let split: [&str; 2] = range_str
             .split(":")
             .collect::<Vec<&str>>()
             .try_into()
-            .unwrap();
+            .expect("Bad port width format");
 
+        // TODO: improve error reporting here?
         let (msb, lsb) = split.map(&str::parse::<i64>).into();
         let msb_unwrap = msb.unwrap();
         let lsb_unwrap = lsb.unwrap();
