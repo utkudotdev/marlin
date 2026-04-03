@@ -4,23 +4,26 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can
 // obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use marlin_verilator::{
-    PortDirection, compute_wdata_word_count_from_width_not_msb,
+    PortDeclaration, PortDirection,
+    compute_wdata_word_count_from_width_not_msb,
     ffi_names::{
         TRACE_CLOSE_AND_DELETE, TRACE_DUMP, TRACE_FLUSH, TRACE_OPEN_NEXT,
     },
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use sv_parser::{self as sv, Locate, RefNode, unwrap_node};
-
-mod util;
 
 pub struct MacroArgs {
     pub source_path: syn::LitStr,
     pub name: syn::LitStr,
+
+    // TODO: should probably parse as smth else
+    pub include_paths: Option<Vec<syn::LitStr>>,
+
+    pub module_params: Option<HashMap<syn::Ident, i64>>,
 
     /// Deprecated; does nothing.
     pub clock_port: Option<syn::LitStr>,
@@ -32,6 +35,10 @@ impl syn::parse::Parse for MacroArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         syn::custom_keyword!(src);
         syn::custom_keyword!(name);
+        syn::custom_keyword!(includes);
+
+        // TODO: instead of doing this, should we find a way to generate a generic struct?
+        syn::custom_keyword!(params);
 
         syn::custom_keyword!(clock);
         syn::custom_keyword!(reset);
@@ -45,13 +52,31 @@ impl syn::parse::Parse for MacroArgs {
         input.parse::<syn::Token![=]>()?;
         let name = input.parse::<syn::LitStr>()?;
 
+        let mut include_paths = None;
         let mut clock_port = None;
         let mut reset_port = None;
+        let mut module_params = None;
+
         while input.peek(syn::Token![,]) {
             input.parse::<syn::Token![,]>()?;
 
             let lookahead = input.lookahead1();
-            if lookahead.peek(clock) {
+            if lookahead.peek(includes) {
+                input.parse::<includes>()?;
+                input.parse::<syn::Token![=]>()?;
+
+                let content;
+                let _ = syn::bracketed!(content in input);
+
+                let paths = syn::punctuated::Punctuated::<
+                    syn::LitStr,
+                    syn::Token![,],
+                >::parse_terminated(&content)?
+                .into_iter()
+                .collect();
+
+                include_paths = Some(paths);
+            } else if lookahead.peek(clock) {
                 input.parse::<clock>()?;
                 input.parse::<syn::Token![=]>()?;
                 clock_port = Some(input.parse::<syn::LitStr>()?);
@@ -59,6 +84,18 @@ impl syn::parse::Parse for MacroArgs {
                 input.parse::<reset>()?;
                 input.parse::<syn::Token![=]>()?;
                 reset_port = Some(input.parse::<syn::LitStr>()?);
+            } else if lookahead.peek(params) {
+                input.parse::<params>()?;
+                input.parse::<syn::Token![=]>()?;
+
+                let content;
+                let _ = syn::braced!(content in input);
+
+                let map = content
+                    .parse_terminated(parse_key_value, syn::Token![,])?
+                    .into_iter()
+                    .collect();
+                module_params = Some(map);
             } else {
                 return Err(lookahead.error());
             }
@@ -67,17 +104,39 @@ impl syn::parse::Parse for MacroArgs {
         Ok(Self {
             source_path,
             name,
+            include_paths,
+            module_params,
             clock_port,
             reset_port,
         })
     }
 }
 
+fn parse_key_value(
+    input: syn::parse::ParseStream,
+) -> syn::Result<(syn::Ident, i64)> {
+    let lookahead = input.lookahead1();
+
+    let key = input.parse()?;
+
+    input.parse::<syn::Token![:]>()?;
+
+    let value = if lookahead.peek(syn::Token![-]) {
+        let _ = input.parse::<syn::Token![-]>()?;
+        -input.parse::<syn::LitInt>()?.base10_parse::<i64>()?
+    } else {
+        input.parse::<syn::LitInt>()?.base10_parse::<i64>()?
+    };
+
+    Ok((key, value))
+}
+
 pub fn build_verilated_struct(
     macro_name: &str,
-    top_name: syn::LitStr,
-    source_path: syn::LitStr,
-    verilog_ports: Vec<(String, usize, usize, PortDirection)>,
+    top_name: &syn::LitStr,
+    source_path: &syn::LitStr,
+    verilog_ports: Vec<PortDeclaration>,
+    verilog_params: &HashMap<syn::Ident, i64>,
     item: TokenStream,
 ) -> TokenStream {
     let crate_name = format_ident!("{}", macro_name);
@@ -116,7 +175,15 @@ pub fn build_verilated_struct(
         _marker: std::marker::PhantomData
     });
 
-    for (port_name, port_msb, port_lsb, port_direction) in verilog_ports {
+    for port in verilog_ports {
+        let PortDeclaration {
+            name: port_name,
+            direction: port_direction,
+            lsb: port_lsb,
+            width: port_width,
+        } = port;
+        let port_msb = port_lsb + port_width - 1;
+
         if port_name.chars().any(|c| c == '\\' || c == ' ') {
             return syn::Error::new_spanned(
                 top_name,
@@ -124,8 +191,6 @@ pub fn build_verilated_struct(
             )
             .into_compile_error();
         }
-
-        let port_width = port_msb + 1 - port_lsb;
 
         let verilator_interface_port_type_name = if port_width <= 8 {
             quote! { CData }
@@ -190,7 +255,8 @@ pub fn build_verilated_struct(
         let port_name_ident = format_ident!("{}", port_name);
         let port_documentation = syn::LitStr::new(
             &format!(
-                "Corresponds to Verilog `{port_direction} {port_name}[{port_msb}:{port_lsb}]`."
+                "Corresponds to Verilog `{} {}[{}:{}]`.",
+                port_direction, port_name, port_msb, port_lsb
             ),
             top_name.span(),
         );
@@ -208,7 +274,7 @@ pub fn build_verilated_struct(
             });
         }
 
-        let port_name_literal = syn::LitStr::new(&port_name, top_name.span());
+        let port_name_literal = syn::LitStr::new(port_name, top_name.span());
 
         match port_direction {
             PortDirection::Input => {
@@ -322,8 +388,19 @@ pub fn build_verilated_struct(
         };
 
         verilated_model_ports_impl.push(quote! {
-            (#port_name, #port_msb, #port_lsb, #verilated_model_port_direction)
+            #crate_name::__reexports::verilator::PortDeclaration {
+                name: #port_name,
+                direction: #verilated_model_port_direction,
+                lsb: #port_lsb,
+                width: #port_width
+            }
         });
+    }
+
+    let mut verilated_model_params_impl = vec![];
+    for (ident, value) in verilog_params {
+        let as_string = ident.to_string();
+        verilated_model_params_impl.push(quote! { (#as_string, #value) });
     }
 
     struct_members.push(quote! {
@@ -334,6 +411,8 @@ pub fn build_verilated_struct(
     let struct_name = item.ident;
     let vis = item.vis;
     let port_count = verilated_model_ports_impl.len();
+    let param_count = verilated_model_params_impl.len();
+
     quote! {
         #vis struct #struct_name<'ctx> {
             #[doc(hidden)]
@@ -385,9 +464,14 @@ pub fn build_verilated_struct(
                 #source_path
             }
 
-            fn ports() -> &'static [(&'static str, usize, usize, #crate_name::__reexports::verilator::PortDirection)] {
-                static PORTS: [(&'static str, usize, usize, #crate_name::__reexports::verilator::PortDirection); #port_count] = [#(#verilated_model_ports_impl),*];
+            fn ports() -> &'static [#crate_name::__reexports::verilator::PortDeclaration<'static>] {
+                static PORTS: [#crate_name::__reexports::verilator::PortDeclaration<'static>; #port_count] = [#(#verilated_model_ports_impl),*];
                 &PORTS
+            }
+
+            fn parameters() -> &'static [(&'static str, i64)] {
+                static PARAMS: [(&'static str, i64); #param_count] = [#(#verilated_model_params_impl),*];
+                &PARAMS
             }
 
             fn init_from(library: &'ctx #crate_name::__reexports::libloading::Library, tracing_enabled: bool) -> Self {
@@ -476,275 +560,4 @@ pub fn build_verilated_struct(
             }
         }
     }
-}
-
-pub fn parse_verilog_ports(
-    top_name: &syn::LitStr,
-    source_path: &syn::LitStr,
-    verilog_source_path: &Path,
-) -> Result<Vec<(String, usize, usize, PortDirection)>, proc_macro2::TokenStream>
-{
-    let defines = HashMap::new();
-    let (ast, _) =
-        match sv::parse_sv(verilog_source_path, &defines, &["."], false, false)
-        {
-            Ok(result) => result,
-            Err(error) => {
-                return Err(syn::Error::new_spanned(
-                source_path,
-                error.to_string()
-                    + " (Try checking, for instance, that the file exists.)",
-            )
-            .into_compile_error());
-            }
-        };
-
-    let Some(module) = (&ast).into_iter().find_map(|node| match node {
-        RefNode::ModuleDeclarationAnsi(module) => {
-            // taken from https://github.com/dalance/sv-parser/blob/master/README.md
-            fn get_identifier(node: RefNode) -> Option<Locate> {
-                match unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
-                    Some(RefNode::SimpleIdentifier(x)) => Some(x.nodes.0),
-                    Some(RefNode::EscapedIdentifier(x)) => Some(x.nodes.0),
-                    _ => None,
-                }
-            }
-
-            let id = unwrap_node!(module, ModuleIdentifier).unwrap();
-            let id = get_identifier(id).unwrap();
-            let id = ast.get_str_trim(&id).unwrap();
-            if id == top_name.value().as_str() {
-                Some(module)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }) else {
-        return Err(syn::Error::new_spanned(
-            top_name,
-            format!(
-                "Could not find module declaration for `{}` in {}",
-                top_name.value(),
-                source_path.value()
-            ),
-        )
-        .into_compile_error());
-    };
-
-    let port_declarations_list = module
-        .nodes
-        .0
-        .nodes
-        .6
-        .as_ref()
-        .and_then(|list| list.nodes.0.nodes.1.as_ref())
-        .map(|list| list.contents())
-        .unwrap_or(vec![]);
-
-    let mut ports = vec![];
-    for (_, port) in port_declarations_list {
-        match port {
-            sv::AnsiPortDeclaration::Net(net) => {
-                let port_name = ast.get_str_trim(&net.nodes.1.nodes.0).expect(
-                    "Port identifier could not be traced back to source code",
-                );
-
-                let (port_direction_node, port_type) = net
-                    .nodes
-                    .0
-                    .as_ref()
-                    .and_then(|maybe_net_header| match maybe_net_header {
-                        sv::NetPortHeaderOrInterfacePortHeader::NetPortHeader(net_port_header) => {
-                            net_port_header.nodes.0.as_ref().map(|d| (d, &net_port_header.nodes.1))
-                        }
-                        _ => todo!("Other port header"),
-                    })
-                    .ok_or_else(|| {
-                        syn::Error::new_spanned(
-                            source_path,
-                            format!(
-                                "Port `{port_name}` has no supported direction (`input` or `output`)"
-                            ),
-                        )
-                        .into_compile_error()
-                    })?;
-
-                let dimensions: &[sv::PackedDimension] = match port_type {
-                    sv::NetPortType::DataType(net_port_type_data_type) => {
-                        match &net_port_type_data_type.nodes.1 {
-                            sv::DataTypeOrImplicit::DataType(data_type) => {
-                                match &**data_type {
-                                    sv::DataType::Vector(data_type_vector) => {
-                                        &data_type_vector.nodes.2
-                                    }
-                                    other => todo!(
-                                        "Unsupported data type {:?}",
-                                        other
-                                    ),
-                                }
-                            }
-                            sv::DataTypeOrImplicit::ImplicitDataType(
-                                implicit_data_type,
-                            ) => &implicit_data_type.nodes.1,
-                        }
-                    }
-                    sv::NetPortType::NetTypeIdentifier(_)
-                    | sv::NetPortType::Interconnect(_) => {
-                        todo!("Port type not yet implemented for net ports")
-                    }
-                };
-
-                let port_info = match process_port_common(
-                    &ast,
-                    top_name,
-                    port_name,
-                    dimensions,
-                    port_direction_node,
-                ) {
-                    Ok(port_info) => port_info,
-                    Err(error) => {
-                        return Err(error.into_compile_error());
-                    }
-                };
-                ports.push(port_info);
-            }
-
-            sv::AnsiPortDeclaration::Variable(var) => {
-                let port_name = ast.get_str_trim(&var.nodes.1.nodes.0).expect(
-                    "Port identifier could not be traced back to source code",
-                );
-
-                let (port_direction_node, port_type) = var
-                    .nodes
-                    .0
-                    .as_ref()
-                    .and_then(|header| {
-                        header.nodes.0.as_ref().map(|d| (d, &header.nodes.1))
-                    })
-                    .ok_or_else(|| {
-                        syn::Error::new_spanned(
-                            source_path,
-                            format!(
-                                "Port `{port_name}` has no supported direction (`input` or `output`)"
-                            ),
-                        )
-                        .into_compile_error()
-                    })?;
-
-                let dimensions: &[sv::PackedDimension] = match &port_type
-                    .nodes
-                    .0
-                {
-                    sv::VarDataType::DataType(data_type) => {
-                        match &**data_type {
-                            sv::DataType::Vector(data_type_vector) => {
-                                &data_type_vector.nodes.2
-                            }
-                            other => todo!("Unsupported data type {:?}", other),
-                        }
-                    }
-                    sv::VarDataType::Var(var_data_type_var) => {
-                        match &var_data_type_var.nodes.1 {
-                            sv::DataTypeOrImplicit::DataType(data_type) => {
-                                match &**data_type {
-                                    sv::DataType::Vector(data_type_vector) => {
-                                        &data_type_vector.nodes.2
-                                    }
-                                    other => todo!(
-                                        "Unsupported data type (in the VarDataType>DataTypeOrImplicit>DataType branch) {:?}",
-                                        other
-                                    ),
-                                }
-                            }
-                            sv::DataTypeOrImplicit::ImplicitDataType(
-                                implicit_data_type,
-                            ) => &implicit_data_type.nodes.1,
-                        }
-                    }
-                };
-
-                let port_info = match process_port_common(
-                    &ast,
-                    top_name,
-                    port_name,
-                    parameter_map,
-                    dimensions,
-                    port_direction_node,
-                ) {
-                    Ok(port_info) => port_info,
-                    Err(error) => {
-                        return Err(error.into_compile_error());
-                    }
-                };
-                ports.push(port_info);
-            }
-            _ => todo!("Other types of ports"),
-        }
-    }
-
-    Ok(ports)
-}
-
-fn process_port_common(
-    ast: &sv::SyntaxTree,
-    top_name: &syn::LitStr,
-    port_name: &str,
-    parameter_map: &HashMap<&str, i64>,
-    dimensions: &[sv::PackedDimension],
-    port_direction_node: &sv::PortDirection,
-) -> Result<(String, usize, usize, PortDirection), syn::Error> {
-    if port_name.chars().any(|c| c == '\\' || c == ' ') {
-        return Err(syn::Error::new_spanned(
-            top_name,
-            "Escaped module names are not supported",
-        ));
-    }
-
-    let (port_msb, port_lsb) = match dimensions.len() {
-        0 => (0, 0),
-        1 => match &dimensions[0] {
-            sv::PackedDimension::Range(packed_dimension_range) => {
-                let range = &packed_dimension_range.nodes.0.nodes.1.nodes;
-                (
-                    util::evaluate_numeric_constant_expression(
-                        ast,
-                        &range.0,
-                        parameter_map,
-                    ),
-                    util::evaluate_numeric_constant_expression(
-                        ast,
-                        &range.2,
-                        parameter_map,
-                    ),
-                )
-            }
-            _ => todo!("Unsupported dimension type"),
-        },
-        _ => todo!("Don't support multidimensional ports yet"),
-    };
-
-    let port_msb_usize = port_msb.try_into().expect(
-        "Port MSB evaluates to negative constant or does not fit in `usize`.",
-    );
-
-    let port_lsb_usize = port_lsb.try_into().expect(
-        "Port LSB evaluates to negative constant or does not fit in `usize`.",
-    );
-
-    let port_direction = match port_direction_node {
-        sv::PortDirection::Input(_) => PortDirection::Input,
-        sv::PortDirection::Output(_) => PortDirection::Output,
-        sv::PortDirection::Inout(_) => PortDirection::Inout,
-        sv::PortDirection::Ref(_) => {
-            todo!("Reference port direction is not supported")
-        }
-    };
-
-    Ok((
-        port_name.to_string(),
-        port_msb_usize,
-        port_lsb_usize,
-        port_direction,
-    ))
 }

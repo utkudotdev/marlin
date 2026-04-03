@@ -4,27 +4,36 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can
 // obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::{env, fmt, path::PathBuf};
+use std::collections::HashMap;
+use std::{env, fmt, process::Command};
 
-use marlin_verilog_macro_builder::{
-    MacroArgs, build_verilated_struct, parse_verilog_ports,
-};
+use camino::Utf8PathBuf;
+use marlin_verilator::{PortDeclaration, PortDirection};
+use marlin_verilog_macro_builder::{MacroArgs, build_verilated_struct};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
+use serde::Deserialize;
 use syn::{parse_macro_input, spanned::Spanned};
 
 #[proc_macro_attribute]
 pub fn verilog(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = syn::parse_macro_input!(args as MacroArgs);
 
-    let manifest_directory = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Please compile using `cargo` or set the `CARGO_MANIFEST_DIR` environment variable"));
-    let source_path = manifest_directory.join(args.source_path.value());
+    let module_params = args.module_params.unwrap_or_default();
 
-    let ports = match parse_verilog_ports(
+    let json = match parse_verilog(
         &args.name,
         &args.source_path,
-        &source_path,
+        &args.include_paths.unwrap_or_default(),
+        &module_params,
     ) {
+        Ok(json) => json,
+        Err(error) => {
+            return error.into();
+        }
+    };
+
+    let ports = match extract_verilog_ports(&args.name, &json) {
         Ok(ports) => ports,
         Err(error) => {
             return error.into();
@@ -33,15 +42,199 @@ pub fn verilog(args: TokenStream, item: TokenStream) -> TokenStream {
 
     build_verilated_struct(
         "verilog",
-        args.name,
-        syn::LitStr::new(
-            source_path.to_string_lossy().as_ref(),
-            args.source_path.span(),
-        ),
+        &args.name,
+        &args.source_path,
         ports,
+        &module_params,
         item.into(),
     )
     .into()
+}
+
+// TODO: do we really need these to be syn objects
+fn parse_verilog(
+    top_name: &syn::LitStr,
+    source_path: &syn::LitStr,
+    include_directories: &Vec<syn::LitStr>,
+    module_params: &HashMap<syn::Ident, i64>,
+) -> Result<serde_json::Value, proc_macro2::TokenStream> {
+    // TODO: we can probably do a lot of code sharing here? Should we cache these outputs? How bad is it to parse every time in a proc macro
+
+    let resolved_source = resolve_input_path(source_path);
+    let mut verilator_command = Command::new("verilator");
+    verilator_command
+        .arg(&resolved_source)
+        .args(["--json-only", "--quiet"])
+        .args(["--json-only-output", "/dev/stdout"])
+        .args(["--json-only-meta-output", "/dev/null"])
+        .args(["--top-module", top_name.value().as_str()]);
+
+    for include_directory in include_directories {
+        let resolved = resolve_input_path(include_directory);
+        verilator_command.arg(format!("-I{resolved}"));
+    }
+
+    for (param, value) in module_params {
+        verilator_command.arg(format!("-G{param}={value}"));
+    }
+
+    let verilator_output = verilator_command.output().map_err(|e| {
+        syn::Error::new_spanned(
+            top_name,
+            format!("Verilator invocation failed! Error: {e}"),
+        )
+        .into_compile_error()
+    })?;
+
+    if !verilator_output.status.success() {
+        return Err(syn::Error::new_spanned(top_name, format!(
+            "Verilator invocation failed with nonzero exit code {}\n\n--- STDOUT ---\n{}\n\n--- STDERR ---\n{}",
+            verilator_output.status,
+            String::from_utf8(verilator_output.stdout).unwrap_or_default(),
+            String::from_utf8(verilator_output.stderr).unwrap_or_default(),
+        )).into_compile_error());
+    }
+
+    String::from_utf8(verilator_output.stdout)
+        .map_err(|_| {
+            syn::Error::new_spanned(
+                top_name,
+                "Failed to decode verilator output.",
+            )
+            .into_compile_error()
+        })
+        .and_then(|s| {
+            serde_json::from_str(&s).map_err(|_| {
+                syn::Error::new_spanned(
+                    top_name,
+                    "Failed to parse verilator output.",
+                )
+                .into_compile_error()
+            })
+        })
+}
+
+#[derive(Deserialize)]
+struct VerilatorJson<'a> {
+    #[serde(borrow)]
+    modulesp: Vec<VerilatorModule<'a>>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum VerilatorModule<'a> {
+    #[serde(rename = "MODULE")]
+    Module {
+        name: &'a str,
+        stmtsp: Vec<VerilatorStatement<'a>>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum VerilatorStatement<'a> {
+    #[serde(rename = "VAR")]
+    #[serde(borrow)]
+    Var(VerilatorVar<'a>),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "varType")]
+enum VerilatorVar<'a> {
+    #[serde(rename = "PORT")]
+    Port {
+        name: &'a str,
+        dtypep: &'a str,
+        direction: VerilatorPortDirection,
+    },
+}
+
+#[derive(Deserialize)]
+enum VerilatorPortDirection {
+    #[serde(rename = "OUTPUT")]
+    Output,
+    #[serde(rename = "INPUT")]
+    Input,
+}
+
+fn extract_verilog_ports<'a>(
+    top_name: &'a syn::LitStr,
+    json: &'a serde_json::Value,
+) -> Result<Vec<PortDeclaration<'a>>, proc_macro2::TokenStream> {
+    // TODO: make this suck less for error handling
+    let modules = json["modulesp"].as_array().unwrap();
+
+    let top_module = modules
+        .iter()
+        .filter(|m| m["type"] == "MODULE")
+        .find(|m| m["name"] == top_name.value())
+        .unwrap();
+
+    let statements = top_module["stmtsp"].as_array().unwrap();
+
+    let ports = statements
+        .iter()
+        .filter(|s| s["type"] == "VAR")
+        .filter(|s| s["varType"] == "PORT");
+
+    let misc = json["miscsp"].as_array().unwrap();
+    let typetable = misc
+        .iter()
+        .find(|info| info["type"] == "TYPETABLE")
+        .unwrap();
+    let all_types = typetable["typesp"].as_array().unwrap();
+
+    let type_map: HashMap<&str, &str> = all_types
+        .iter()
+        .filter(|ty| ty["type"] == "BASICDTYPE")
+        .map(|ty| {
+            (
+                ty["addr"].as_str().unwrap(),
+                ty.get("range")
+                    .map(|v| v.as_str().unwrap())
+                    .unwrap_or("1:0"),
+            )
+        })
+        .collect();
+
+    let mut result = vec![];
+    for port in ports {
+        let name = port["name"].as_str().unwrap();
+        let ty = port["dtypep"].as_str().unwrap();
+        let direction_str = port["direction"].as_str().unwrap();
+        let range_str = type_map[ty];
+
+        let direction = match direction_str {
+            "OUTPUT" => PortDirection::Output,
+            "INPUT" => PortDirection::Input,
+            _ => todo!(),
+        };
+
+        let split: [&str; 2] = range_str
+            .split(":")
+            .collect::<Vec<&str>>()
+            .try_into()
+            .unwrap();
+
+        let (msb, lsb) = split.map(&str::parse::<i64>).into();
+        let msb_unwrap = msb.unwrap();
+        let lsb_unwrap = lsb.unwrap();
+        let width = (msb_unwrap - lsb_unwrap + 1).try_into().unwrap();
+
+        result.push(PortDeclaration {
+            name,
+            lsb: lsb_unwrap.try_into().unwrap(),
+            width,
+            direction,
+        })
+    }
+
+    Ok(result)
+}
+
+fn resolve_input_path(path: &syn::LitStr) -> Utf8PathBuf {
+    let manifest_directory = Utf8PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Please compile using `cargo` or set the `CARGO_MANIFEST_DIR` environment variable"));
+    manifest_directory.join(path.value())
 }
 
 enum DPIPrimitiveType {

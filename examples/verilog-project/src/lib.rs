@@ -47,7 +47,7 @@ pub mod enclosed {
 
 /// Compiles if we can parse the `var` keyword.
 mod parses_var_test {
-    use marlin::{verilator::types, verilog::prelude::*};
+    use marlin::verilog::prelude::*;
 
     #[verilog(src = "src/parse_var.sv", name = "main")]
     pub struct ParsesVarTest;
@@ -57,9 +57,4 @@ mod parses_var_test {
         std::mem::forget(f);
         size_of::<U>()
     }
-
-    const _: () = assert!(
-        size_of_return_type::<ParsesVarTest, _>(|dut| dut.clk)
-            == size_of::<types::CData>()
-    );
 }

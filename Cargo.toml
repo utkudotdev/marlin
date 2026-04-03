@@ -1,17 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
-  "verilator",
-  "language-support/verilog",
-  "language-support/verilog-macro",
-  "language-support/verilog-macro-builder",
-  "language-support/spade",
-  "language-support/spade-macro",
-  "language-support/veryl",
-  "language-support/veryl-macro",
-  "examples/verilog-project",
-  "examples/spade-project",
-  "examples/veryl_project",
+    "verilator",
+    "language-support/verilog",
+    "language-support/verilog-macro",
+    "language-support/spade",
+    "language-support/spade-macro",
+    "language-support/veryl",
+    "language-support/veryl-macro",
+    "examples/verilog-project",
+    "examples/spade-project",
+    "examples/veryl_project",
 ]
 
 [workspace.package]
@@ -42,9 +41,16 @@ proc-macro2 = { version = "1.0.93", default-features = false }
 syn = { version = "2.0.96", features = ["full"] }
 quote = { version = "1.0.38", default-features = false }
 
-sv-parser = { version = "0.13.5", default-features = false }
+
 spade-parser = { version = "0.16.0", default-features = false }
 spade-ast = { version = "0.16.0", default-features = false }
+serde = { version = "1.0.228", default-features = false, features = [
+    "derive",
+    "std",
+] }
+serde_json = { version = "1.0.149", default-features = false, features = [
+    "std",
+] }
 veryl-parser = { version = "0.14.2-rc.1", default-features = false }
 
 marlin-verilator = { path = "verilator", version = "0.16.0" }

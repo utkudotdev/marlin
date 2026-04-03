@@ -12,19 +12,25 @@
 // You should have received a copy of the GNU General Public License along with
 // this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::path::Path;
+
 use example_verilog_project::ParamsMain;
-use marlin::verilator::{VerilatorRuntime, VerilatorRuntimeOptions};
+use marlin::verilator::{
+    VerilatorRuntime, VerilatorRuntimeOptions, verilator_version,
+    verilog::prelude::*,
+};
 use snafu::Whatever;
 
 #[test]
 #[snafu::report]
 fn basic_parameters() -> Result<(), Whatever> {
-    let runtime = VerilatorRuntime::new(
-        "artifacts".into(),
-        &["src/params.sv".as_ref()],
-        &[],
+    let runtime = VerilatorRuntime::new2(
+        "artifacts",
+        &["src/params.sv"],
+        &[] as &[&Path],
         [],
-        VerilatorRuntimeOptions::default_logging(),
+        VerilatorRuntimeOptions::default()
+            .allow_unsupported_verilator(Some(verilator_version!(5 020))),
     )?;
 
     let mut main = runtime.create_model_simple::<ParamsMain>()?;

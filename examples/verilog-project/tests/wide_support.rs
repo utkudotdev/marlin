@@ -15,7 +15,11 @@
 use std::path::Path;
 
 use example_verilog_project::WideMain;
-use marlin::verilator::{PortDeclaration, VerilatorRuntime, verilator_version};
+use marlin::verilator::{
+    AsDynamicVerilatedModel, PortDeclaration, PortDirection,
+    VerilatedModelConfig, VerilatorRuntime, VerilatorRuntimeOptions, WideIn,
+    verilator_version,
+};
 use snafu::Whatever;
 
 #[test]
@@ -135,9 +139,20 @@ fn wide_main4_forwards_correctly_dynamically() -> Result<(), Whatever> {
         "wide_main4",
         "src/wide_main.sv",
         &[
-            ("wide_input", 255, 128, PortDirection::Input),
-            ("wide_output", 255, 128, PortDirection::Output),
+            PortDeclaration {
+                name: "wide_input",
+                direction: PortDirection::Input,
+                lsb: 128,
+                width: 128,
+            },
+            PortDeclaration {
+                name: "wide_output",
+                direction: PortDirection::Output,
+                lsb: 128,
+                width: 128,
+            },
         ],
+        &[],
         VerilatedModelConfig::default(),
     )?;
 

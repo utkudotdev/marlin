@@ -4,7 +4,7 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can
 // obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::{env, fs, iter, str};
+use std::{collections::HashMap, env, fs, iter, str};
 
 use camino::Utf8PathBuf;
 use marlin_verilator::PortDirection;
@@ -33,7 +33,7 @@ struct ModuleFinder<'args, 'source> {
     args: &'args MacroArgs,
     source_code: &'source str,
     look_for: String,
-    found: Option<Vec<(String, usize, usize, PortDirection)>>,
+    found: Option<Vec<marlin_verilator::PortDeclaration<'source>>>,
     error: Option<syn::Error>,
 }
 
@@ -165,12 +165,12 @@ impl VerylWalker for ModuleFinder<'_, '_> {
                                 }
                             };
 
-                            ports.push((
-                                port_name.to_string(),
-                                port_width,
-                                0,
-                                port_direction,
-                            ));
+                            ports.push(marlin_verilator::PortDeclaration {
+                                name: port_name,
+                                direction: port_direction,
+                                lsb: 0,
+                                width: port_width,
+                            });
                         }
                         PortDeclarationItemGroup::PortTypeAbstract(_) => {
                             self.error = Some(syn::Error::new_spanned(
@@ -293,9 +293,10 @@ pub fn veryl(args: TokenStream, item: TokenStream) -> TokenStream {
 
     build_verilated_struct(
         "veryl",
-        verilog_module_name,
-        verilog_source_path,
+        &verilog_module_name,
+        &verilog_source_path,
         ports,
+        &HashMap::new(),
         item.into(),
     )
     .into()

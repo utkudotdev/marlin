@@ -17,8 +17,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use snafu::{Whatever, prelude::*};
 
 use crate::{
-    BuildTarget, PortDirection, VerilatedModelConfig, VerilatorRuntimeOptions,
-    VerilatorVersion, compute_wdata_word_count_from_width_not_msb,
+    BuildTarget, PortDeclaration, PortDirection, VerilatedModelConfig,
+    VerilatorRuntimeOptions, VerilatorVersion,
+    compute_wdata_word_count_from_width_not_msb,
     dpi::DpiFunction,
     ffi_names::{
         self, DPI_INIT_CALLBACK, TRACE_CLOSE_AND_DELETE, TRACE_DUMP,
@@ -107,7 +108,7 @@ fn build_ffi_for_tracing(
 fn build_ffi(
     artifact_directory: &Utf8Path,
     top_module: &str,
-    ports: &[(&str, usize, usize, PortDirection)],
+    ports: &[PortDeclaration],
     enable_tracing: Option<Waveform>,
 ) -> Result<Utf8PathBuf, Whatever> {
     let ffi_wrappers = artifact_directory.join("ffi.cpp");
@@ -150,20 +151,22 @@ extern "C" {{
     )
     .whatever_context("Failed to format utility FFI")?;
 
-    for (port, msb, lsb, direction) in ports {
-        let width = msb - lsb + 1;
-        let macro_prefix = match direction {
+    for port in ports {
+        let port_name = port.name;
+        let port_lsb = port.lsb;
+        let port_msb = port.lsb + port.width - 1;
+        let macro_prefix = match port.direction {
             PortDirection::Input => "VL_IN",
             PortDirection::Output => "VL_OUT",
             PortDirection::Inout => "VL_INOUT",
         };
-        let macro_suffix = if width <= 8 {
+        let macro_suffix = if port.width <= 8 {
             "8"
-        } else if width <= 16 {
+        } else if port.width <= 16 {
             "16"
-        } else if width <= 32 {
+        } else if port.width <= 32 {
             ""
-        } else if width <= 64 {
+        } else if port.width <= 64 {
             "64"
         } else {
             "W"
@@ -172,28 +175,31 @@ extern "C" {{
         // parameters and return types.
         let const_type_macro = |name: Option<&str>| {
             let name_or_empty = name.unwrap_or("/* return value */");
-            if width <= 64 {
+            if port.width <= 64 {
                 format!(
-                    "{macro_prefix}{macro_suffix}({name_or_empty}, {msb}, {lsb})",
+                    "{macro_prefix}{macro_suffix}({name_or_empty}, {port_msb}, {port_lsb})",
                 )
             } else {
                 format!("const WData* {name_or_empty}")
             }
         };
 
-        let pin_port = ffi_names::pin_port(top_module, port);
-        let read_port = ffi_names::read_port(top_module, port);
+        let pin_port = ffi_names::pin_port(top_module, port.name);
+        let read_port = ffi_names::read_port(top_module, port.name);
 
-        if matches!(direction, PortDirection::Input | PortDirection::Inout) {
+        if matches!(port.direction, PortDirection::Input | PortDirection::Inout)
+        {
             let input_type = const_type_macro(Some("new_value"));
-            let pin_code = if width <= 64 {
-                format!("top->{port} = new_value;")
+            let pin_code = if port.width <= 64 {
+                format!("top->{port_name} = new_value;")
             } else {
                 let word_count =
-                    compute_wdata_word_count_from_width_not_msb(width);
+                    compute_wdata_word_count_from_width_not_msb(port.width);
                 let bytes_to_copy = word_count * size_of::<types::WData>();
                 // https://en.cppreference.com/w/cpp/string/byte/memcpy
-                format!("std::memcpy(top->{port}, new_value, {bytes_to_copy});")
+                format!(
+                    "std::memcpy(top->{port_name}, new_value, {bytes_to_copy});"
+                )
             };
             writeln!(
                 &mut buffer,
@@ -201,19 +207,23 @@ extern "C" {{
     void {pin_port}(V{top_module}* top, {input_type}) {{
         {pin_code}
     }}
-            "#
+            "#,
             )
             .whatever_context("Failed to format input port FFI")?;
         }
 
-        if matches!(direction, PortDirection::Output | PortDirection::Inout) {
-            let to_pointer_if_wide = if width > 64 { ".data()" } else { "" };
+        if matches!(
+            port.direction,
+            PortDirection::Output | PortDirection::Inout
+        ) {
+            let to_pointer_if_wide =
+                if port.width > 64 { ".data()" } else { "" };
             let return_type = const_type_macro(None);
             writeln!(
                 &mut buffer,
                 r#"
     {return_type} {read_port}(V{top_module}* top) {{
-        return top->{port}{to_pointer_if_wide};
+        return top->{port_name}{to_pointer_if_wide};
     }}
             "#
             )
@@ -403,7 +413,8 @@ pub fn build_library(
     include_directories: &[Utf8PathBuf],
     dpi_functions: &[&'static dyn DpiFunction],
     top_module: &str,
-    ports: &[(&str, usize, usize, PortDirection)],
+    ports: &[PortDeclaration],
+    parameters: &[(&str, i64)],
     artifact_directory: &Utf8Path,
     options: &VerilatorRuntimeOptions,
     config: &VerilatedModelConfig,
@@ -485,6 +496,9 @@ pub fn build_library(
         .arg(ffi_wrappers);
     for include_directory in include_directories {
         verilator_command.arg(format!("-I{include_directory}"));
+    }
+    for (name, value) in parameters {
+        verilator_command.arg(format!("-G{name}={value}"));
     }
     if let Some(dpi_file) = dpi_file {
         verilator_command.arg(dpi_file);

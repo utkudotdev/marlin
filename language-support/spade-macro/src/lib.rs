@@ -4,10 +4,10 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can
 // obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::{env, fs};
+use std::{collections::HashMap, env, fs};
 
 use camino::Utf8PathBuf;
-use marlin_verilator::PortDirection;
+use marlin_verilator::{PortDeclaration, PortDirection};
 use marlin_verilog_macro_builder::{MacroArgs, build_verilated_struct};
 use proc_macro::TokenStream;
 use spade_parser::logos::Logos;
@@ -172,21 +172,20 @@ pub fn spade(args: TokenStream, item: TokenStream) -> TokenStream {
             _ => PortDirection::Input,
         };
 
-        let port_msb = spade_simple_type_width(&port_type.inner) - 1;
-
-        ports.push((
-            port_name.inner.as_str().to_string(),
-            port_msb,
-            0,
-            port_direction,
-        ));
+        ports.push(PortDeclaration {
+            name: port_name.as_str(),
+            direction: port_direction,
+            lsb: 0,
+            width: spade_simple_type_width(&port_type.inner),
+        });
     }
 
     build_verilated_struct(
         "spade",
-        args.name,
-        verilog_source_path,
+        &args.name,
+        &verilog_source_path,
         ports,
+        &HashMap::new(),
         item.into(),
     )
     .into()

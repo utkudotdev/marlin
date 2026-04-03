@@ -14,8 +14,11 @@ proc-macro = true
 
 [dependencies]
 marlin-verilator.workspace = true
+marlin-verilog-macro-builder.workspace = true
 
 syn.workspace = true
 quote.workspace = true
-
-marlin-verilog-macro-builder.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+proc-macro2.workspace = true
+camino.workspace = true

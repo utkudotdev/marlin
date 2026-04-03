@@ -185,6 +185,14 @@ pub enum PortDirection {
     Inout,
 }
 
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+pub struct PortDeclaration<'name> {
+    pub name: &'name str,
+    pub direction: PortDirection,
+    pub lsb: usize,
+    pub width: usize, // big endian ports are not supported, so positive width
+}
+
 impl fmt::Display for PortDirection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -282,9 +290,11 @@ pub trait AsVerilatedModel<'ctx>: 'ctx {
     /// The path of the module's definition.
     fn source_path() -> &'static str;
 
-    /// The module's interface; each element is `(port_name, port_msb, port_lsb,
-    /// port_direction)`.
-    fn ports() -> &'static [(&'static str, usize, usize, PortDirection)];
+    /// The module's interface.
+    fn ports() -> &'static [PortDeclaration<'static>];
+
+    /// The parameters passed to the module at construction.
+    fn parameters() -> &'static [(&'static str, i64)];
 
     #[doc(hidden)]
     fn init_from(library: &'ctx Library, tracing_enabled: bool) -> Self;
@@ -660,6 +670,7 @@ impl VerilatorRuntime {
                 M::name(),
                 M::source_path(),
                 M::ports(),
+                M::parameters(),
                 config,
             )
             .whatever_context(
@@ -719,11 +730,12 @@ impl VerilatorRuntime {
         &'ctx self,
         name: &str,
         source_path: &str,
-        ports: &[(&str, usize, usize, PortDirection)],
+        ports: &[PortDeclaration],
+        parameters: &[(&str, i64)],
         config: VerilatedModelConfig,
     ) -> Result<DynamicVerilatedModel<'ctx>, Whatever> {
         let library = self
-            .build_or_retrieve_library(name, source_path, ports, &config)
+            .build_or_retrieve_library(name, source_path, ports,parameters, &config)
             .whatever_context(
                 "Failed to build or retrieve verilator dynamic library. Try removing the build directory if it is corrupted.",
             )?;
@@ -749,12 +761,12 @@ impl VerilatorRuntime {
         let ports = ports
             .iter()
             .copied()
-            .map(|(port, high, low, direction)| {
+            .map(|port| {
                 (
-                    port.to_string(),
+                    port.name.to_string(),
                     DynamicPortInfo {
-                        width: high + 1 - low,
-                        direction,
+                        width: port.width,
+                        direction: port.direction,
                     },
                 )
             })
@@ -803,7 +815,8 @@ impl VerilatorRuntime {
         &self,
         name: &str,
         source_path: &str,
-        ports: &[(&str, usize, usize, PortDirection)],
+        ports: &[PortDeclaration],
+        parameters: &[(&str, i64)],
         config: &VerilatedModelConfig,
     ) -> Result<&Library, Whatever> {
         if name.chars().any(|c| c == '\\' || c == ' ') {
@@ -826,18 +839,9 @@ impl VerilatorRuntime {
             );
         }
 
-        if let Some((port, _, _, _)) =
-            ports.iter().find(|(_, high, low, _)| high < low)
-        {
-            whatever!(
-                "Port {} on module {} was specified with the high bit less than the low bit",
-                port,
-                name
-            );
-        }
-
         let mut hasher = hash::DefaultHasher::new();
         ports.hash(&mut hasher);
+        parameters.hash(&mut hasher);
         config.hash(&mut hasher);
         let library_key = LibraryArenaKey {
             name: name.to_owned(),
@@ -939,6 +943,7 @@ impl VerilatorRuntime {
                     &self.dpi_functions,
                     name,
                     ports,
+                    parameters,
                     &local_artifacts_directory,
                     &self.options,
                     config,

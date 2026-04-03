@@ -14,7 +14,11 @@
 
 use std::path::Path;
 
-use marlin::verilator::{PortDeclaration, verilator_version};
+use marlin::verilator::{
+    AsDynamicVerilatedModel, PortDeclaration, PortDirection,
+    VerilatedModelConfig, VerilatorRuntime, VerilatorRuntimeOptions,
+    verilator_version,
+};
 use snafu::Whatever;
 
 #[test]
