@@ -19,10 +19,7 @@ use quote::{format_ident, quote};
 pub struct MacroArgs {
     pub source_path: syn::LitStr,
     pub name: syn::LitStr,
-
-    // TODO: should probably parse as smth else
     pub include_paths: Option<Vec<syn::LitStr>>,
-
     pub module_params: Option<HashMap<syn::Ident, i64>>,
 
     /// Deprecated; does nothing.
@@ -36,12 +33,11 @@ impl syn::parse::Parse for MacroArgs {
         syn::custom_keyword!(src);
         syn::custom_keyword!(name);
         syn::custom_keyword!(includes);
-
-        // TODO: instead of doing this, should we find a way to generate a generic struct?
         syn::custom_keyword!(params);
 
         syn::custom_keyword!(clock);
         syn::custom_keyword!(reset);
+
         input.parse::<src>()?;
         input.parse::<syn::Token![=]>()?;
         let source_path = input.parse::<syn::LitStr>()?;
@@ -53,9 +49,9 @@ impl syn::parse::Parse for MacroArgs {
         let name = input.parse::<syn::LitStr>()?;
 
         let mut include_paths = None;
+        let mut module_params = None;
         let mut clock_port = None;
         let mut reset_port = None;
-        let mut module_params = None;
 
         while input.peek(syn::Token![,]) {
             input.parse::<syn::Token![,]>()?;
@@ -76,14 +72,6 @@ impl syn::parse::Parse for MacroArgs {
                 .collect();
 
                 include_paths = Some(paths);
-            } else if lookahead.peek(clock) {
-                input.parse::<clock>()?;
-                input.parse::<syn::Token![=]>()?;
-                clock_port = Some(input.parse::<syn::LitStr>()?);
-            } else if lookahead.peek(reset) {
-                input.parse::<reset>()?;
-                input.parse::<syn::Token![=]>()?;
-                reset_port = Some(input.parse::<syn::LitStr>()?);
             } else if lookahead.peek(params) {
                 input.parse::<params>()?;
                 input.parse::<syn::Token![=]>()?;
@@ -96,6 +84,14 @@ impl syn::parse::Parse for MacroArgs {
                     .into_iter()
                     .collect();
                 module_params = Some(map);
+            } else if lookahead.peek(clock) {
+                input.parse::<clock>()?;
+                input.parse::<syn::Token![=]>()?;
+                clock_port = Some(input.parse::<syn::LitStr>()?);
+            } else if lookahead.peek(reset) {
+                input.parse::<reset>()?;
+                input.parse::<syn::Token![=]>()?;
+                reset_port = Some(input.parse::<syn::LitStr>()?);
             } else {
                 return Err(lookahead.error());
             }
@@ -252,7 +248,7 @@ pub fn build_verilated_struct(
             }
         };
 
-        let port_name_ident = format_ident!("{}", port_name);
+        let port_name_ident = format_ident!("r#{}", port_name);
         let port_documentation = syn::LitStr::new(
             &format!(
                 "Corresponds to Verilog `{} {}[{}:{}]`.",

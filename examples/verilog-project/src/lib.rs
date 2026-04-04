@@ -32,6 +32,12 @@ pub struct WideMain4;
 #[verilog(src = "src/params.sv", name = "params_main", params = { N: 4, M: 8, K: 10 })]
 pub struct ParamsMain;
 
+#[verilog(src = "src/include_for_width.sv", name = "main", includes = ["src/"])]
+pub struct IncludeMain;
+
+#[verilog(src = "src/keyword_port.sv", name = "main")]
+pub struct KeywordMain;
+
 #[verilog(src = "src/dpi.sv", name = "dpi_main")]
 pub struct DpiMain;
 

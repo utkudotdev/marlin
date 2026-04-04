@@ -15,10 +15,12 @@
 use std::path::Path;
 
 use example_verilog_project::WideMain;
-use marlin::verilator::{
-    AsDynamicVerilatedModel, PortDeclaration, PortDirection,
-    VerilatedModelConfig, VerilatorRuntime, VerilatorRuntimeOptions, WideIn,
-    verilator_version,
+use marlin::{
+    verilator::{
+        PortDeclaration, PortDirection, VerilatedModelConfig, VerilatorRuntime,
+        VerilatorRuntimeOptions, WideIn, verilator_version,
+    },
+    verilog::prelude::*,
 };
 use snafu::Whatever;
 

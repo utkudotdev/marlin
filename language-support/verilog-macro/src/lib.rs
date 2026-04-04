@@ -12,7 +12,7 @@ use marlin_verilator::{PortDeclaration, PortDirection};
 use marlin_verilog_macro_builder::{MacroArgs, build_verilated_struct};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use serde::Deserialize;
+use serde::{Deserialize, de};
 use syn::{parse_macro_input, spanned::Spanned};
 
 #[proc_macro_attribute]
@@ -51,20 +51,19 @@ pub fn verilog(args: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-// TODO: do we really need these to be syn objects
 fn parse_verilog(
     top_name: &syn::LitStr,
     source_path: &syn::LitStr,
     include_directories: &Vec<syn::LitStr>,
     module_params: &HashMap<syn::Ident, i64>,
 ) -> Result<VerilatorJson, proc_macro2::TokenStream> {
-    // TODO: we can probably do a lot of code sharing here? Should we cache these outputs? How bad is it to parse every time in a proc macro
-
     let resolved_source = resolve_input_path(source_path);
+
     let mut verilator_command = Command::new("verilator");
     verilator_command
         .arg(&resolved_source)
-        .args(["--json-only", "--quiet"])
+        .arg("--json-only")
+        .arg("--quiet")
         .args(["--json-only-output", "/dev/stdout"])
         .args(["--json-only-meta-output", "/dev/null"])
         .args(["--top-module", top_name.value().as_str()]);
@@ -77,6 +76,9 @@ fn parse_verilog(
     for (param, value) in module_params {
         verilator_command.arg(format!("-G{param}={value}"));
     }
+
+    // Ignore all warnings, we basically just want parsing here.
+    verilator_command.args(["-Wno-lint", "-Wno-style"]);
 
     let verilator_output = verilator_command.output().map_err(|e| {
         syn::Error::new_spanned(
@@ -103,11 +105,11 @@ fn parse_verilog(
             )
             .into_compile_error()
         })
-        .and_then(|s| {
-            serde_json::from_str(&s).map_err(|serde_err| {
+        .and_then(|stdout| {
+            serde_json::from_str(&stdout).map_err(|serde_err| {
                 syn::Error::new_spanned(
                     top_name,
-                    format!("Failed to parse verilator output: {serde_err}"),
+                    format!("Failed to parse verilator output: {serde_err}\n\n--- STDOUT ---\n{stdout}"),
                 )
                 .into_compile_error()
             })
@@ -156,15 +158,48 @@ enum VerilatorJsonType {
     #[serde(rename = "BASICDTYPE")]
     BasicDType {
         addr: String,
-        #[serde(default = "range_default")]
-        range: String,
+        #[serde(default)]
+        range: VerilatorJsonRange,
     },
     #[serde(other)]
     Unknown,
 }
 
-fn range_default() -> String {
-    "1:0".to_owned()
+struct VerilatorJsonRange {
+    msb: usize,
+    lsb: usize,
+}
+
+impl Default for VerilatorJsonRange {
+    fn default() -> Self {
+        Self { msb: 1, lsb: 0 }
+    }
+}
+
+impl<'de> Deserialize<'de> for VerilatorJsonRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let range_str: &str = de::Deserialize::deserialize(deserializer)?;
+
+        let split: [&str; 2] = range_str
+            .split(":")
+            .collect::<Vec<&str>>()
+            .try_into()
+            .map_err(|_| {
+                de::Error::custom("range should have two components")
+            })?;
+
+        let (msb, lsb) = split
+            .map(|s| s.parse::<usize>().map_err(de::Error::custom))
+            .into();
+
+        Ok(Self {
+            msb: msb?,
+            lsb: lsb?,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -194,7 +229,25 @@ fn extract_verilog_ports<'json>(
     top_name: &syn::LitStr,
     json: &'json VerilatorJson,
 ) -> Result<Vec<PortDeclaration<'json>>, proc_macro2::TokenStream> {
-    let ports = json
+    let type_map: HashMap<&str, &VerilatorJsonRange> = json
+        .miscsp
+        .iter()
+        .filter_map(|info| match info {
+            VerilatorJsonInfo::TypeTable { typesp } => Some(typesp),
+            _ => None,
+        })
+        .next()
+        .expect("No type table found in Verilator output")
+        .iter()
+        .filter_map(|ty| match ty {
+            VerilatorJsonType::BasicDType { addr, range } => {
+                Some((addr.as_str(), range))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let module_statements = json
         .modulesp
         .iter()
         .filter_map(|m| match m {
@@ -212,38 +265,19 @@ fn extract_verilog_ports<'json>(
                 format!("No Verilog module named \"{}\"", top_name.value()),
             )
             .into_compile_error(),
-        )?
-        .iter()
-        .filter_map(|s| match s {
-            VerilatorJsonStatement::Var(VerilatorJsonVar::Port {
-                name,
-                dtypep,
-                direction,
-            }) => Some((name, dtypep, direction)),
-            _ => None,
-        });
+        )?;
 
-    let type_map: HashMap<&str, &str> = json
-        .miscsp
-        .iter()
-        .filter_map(|m| match m {
-            VerilatorJsonInfo::TypeTable { typesp } => Some(typesp),
-            _ => None,
-        })
-        .next()
-        .expect("No type table found in Verilator output")
-        .iter()
-        .filter_map(|ty| match ty {
-            VerilatorJsonType::BasicDType { addr, range } => {
-                Some((addr.as_str(), range.as_str()))
-            }
-            _ => None,
-        })
-        .collect();
+    let module_ports = module_statements.iter().filter_map(|s| match s {
+        VerilatorJsonStatement::Var(VerilatorJsonVar::Port {
+            name,
+            dtypep,
+            direction,
+        }) => Some((name, dtypep, direction)),
+        _ => None,
+    });
 
-    let mut result = vec![];
-    for (name, dtypep, direction) in ports {
-        let range_str = type_map[dtypep.as_str()];
+    module_ports.map(|(name, dtypep, direction)| {
+        let range = type_map[dtypep.as_str()];
 
         let direction = match direction {
             VerilatorJsonPortDir::Input => PortDirection::Input,
@@ -251,27 +285,22 @@ fn extract_verilog_ports<'json>(
             VerilatorJsonPortDir::Inout => PortDirection::Inout,
         };
 
-        let split: [&str; 2] = range_str
-            .split(":")
-            .collect::<Vec<&str>>()
-            .try_into()
-            .expect("Bad port width format");
+        if range.msb < range.lsb {
+            return Err(
+                syn::Error::new_spanned(
+                top_name,
+                format!("Ascending port ranges are not supported. Effective MSB is {} and effective LSB is {}", range.msb, range.lsb),
+                ).into_compile_error()
+            );
+        }
 
-        // TODO: improve error reporting here?
-        let (msb, lsb) = split.map(&str::parse::<i64>).into();
-        let msb_unwrap = msb.unwrap();
-        let lsb_unwrap = lsb.unwrap();
-        let width = (msb_unwrap - lsb_unwrap + 1).try_into().unwrap();
-
-        result.push(PortDeclaration {
+        Ok(PortDeclaration {
             name,
-            lsb: lsb_unwrap.try_into().unwrap(),
-            width,
+            lsb: range.lsb,
+            width: range.msb - range.lsb + 1,
             direction,
         })
-    }
-
-    Ok(result)
+    }).collect()
 }
 
 fn resolve_input_path(path: &syn::LitStr) -> Utf8PathBuf {
