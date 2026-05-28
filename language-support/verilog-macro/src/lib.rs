@@ -202,17 +202,18 @@ impl<'de> Deserialize<'de> for VerilatorJsonRange {
     }
 }
 
+// Uses untagged enums. Tagged enums don't work here because varType is not always PORT for ports.
+// Relies on port direction to figure out which vars are ports.
 #[derive(Deserialize)]
-#[serde(tag = "varType")]
+#[serde(untagged)]
 enum VerilatorJsonVar {
-    #[serde(rename = "PORT")]
     Port {
         name: String,
         dtypep: String,
         direction: VerilatorJsonPortDir,
     },
-    #[serde(other)]
-    Unknown,
+    #[allow(dead_code)]
+    Unknown(serde_json::Value),
 }
 
 #[derive(Deserialize)]
